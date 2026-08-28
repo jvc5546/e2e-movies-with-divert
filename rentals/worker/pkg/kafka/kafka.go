@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/Shopify/sarama"
 	"github.com/okteto/movies/pkg/database"
@@ -14,6 +15,7 @@ import (
 type ConsumerGroupHandler struct {
 	ctx          context.Context
 	MessageCount int
+	namespace    string
 	divertKey    string
 	db           *sql.DB
 	cg           sarama.ConsumerGroup
@@ -39,6 +41,7 @@ func NewConsumerGroup(ctx context.Context, namespace string, divertKey string, a
 	handler := &ConsumerGroupHandler{
 		ctx:          ctx,
 		MessageCount: 0,
+		namespace:    namespace,
 		divertKey:    divertKey,
 		db:           db,
 		cg:           consumerGroup,
@@ -65,7 +68,7 @@ func (h *ConsumerGroupHandler) Consume(topics []string) error {
 	return h.cg.Consume(h.ctx, topics, h)
 }
 
-/*func (c *ConsumerGroupHandler) shouldProcessMessage(baggage string) bool {
+func (c *ConsumerGroupHandler) shouldProcessMessage(baggage string) bool {
 	// Extract okteto-divert value from baggage
 	divertValue := extractOktetoDivertFromBaggage(baggage)
 
@@ -78,10 +81,10 @@ func (h *ConsumerGroupHandler) Consume(topics []string) error {
 	return c.divertKey == ""
 
 	// Rule 3: If this doesn't belong to anybody else, the 'shared' should get it
-}*/
+}
 
 // extractOktetoDivertFromBaggage parses baggage string and extracts okteto-divert value
-/*func extractOktetoDivertFromBaggage(baggage string) string {
+func extractOktetoDivertFromBaggage(baggage string) string {
 	if baggage == "" {
 		return ""
 	}
@@ -96,47 +99,51 @@ func (h *ConsumerGroupHandler) Consume(topics []string) error {
 	}
 
 	return ""
-}*/
+}
 
-// extractBaggageHeader extracts the baggage header value from Kafka message headers
-/*func extractBaggageHeader(headers []*sarama.RecordHeader) string {
+// extractHeader extracts a named header's value from Kafka message headers.
+// Used for "baggage" (divert routing), "title" and "request-id" (both purely
+// for log correlation — see ConsumeClaim).
+func extractHeader(headers []*sarama.RecordHeader, key string) string {
 	for _, header := range headers {
-		if string(header.Key) == "baggage" {
-			baggageValue := string(header.Value)
-			if baggageValue != "" {
-				fmt.Printf("Baggage header found in Kafka message: %s\n", baggageValue)
-			}
-			return baggageValue
+		if string(header.Key) == key {
+			return string(header.Value)
 		}
 	}
 	return ""
-}*/
+}
 
 // ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages()
 func (h *ConsumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	for message := range claim.Messages() {
-		// Extract baggage header once for the message
-		//baggageHeader := extractBaggageHeader(message.Headers)
+		// Extract headers once for the message. "title" and "request-id" carry
+		// no routing logic — they only exist so a log line on one worker can be
+		// correlated with the matching accept/skip line on every other worker
+		// consuming the same shared topic.
+		baggageHeader := extractHeader(message.Headers, "baggage")
+		title := extractHeader(message.Headers, "title")
+		requestID := extractHeader(message.Headers, "request-id")
 
 		// Check if we should process this message based on divert logic
-		//if !h.shouldProcessMessage(baggageHeader) {
-		//	log.Printf("Not processing message, it belongs to a diverted worker")
-		//	continue
-		//}
+		if !h.shouldProcessMessage(baggageHeader) {
+			target := extractOktetoDivertFromBaggage(baggageHeader)
+			log.Printf("[req=%s] Not processing %q (target=%s) — it belongs to a diverted worker", requestID, title, target)
+			continue
+		}
 
 		h.MessageCount++
 
 		// Determine message type based on topic
 		if message.Topic == "rentals" {
-			if !h.processRentalMessage(string(message.Key), string(message.Value)) {
+			if !h.processRentalMessage(string(message.Key), string(message.Value), title, requestID) {
 				// Don't commit if processing failed
-				log.Printf("Failed to process rental message, will retry on next poll")
+				log.Printf("[req=%s] Failed to process rental message, will retry on next poll", requestID)
 				continue
 			}
 		} else if message.Topic == "returns" {
-			if !h.processReturnMessage(string(message.Value)) {
+			if !h.processReturnMessage(string(message.Value), title, requestID) {
 				// Don't commit if processing failed
-				log.Printf("Failed to process return message, will retry on next poll")
+				log.Printf("[req=%s] Failed to process return message, will retry on next poll", requestID)
 				continue
 			}
 		}
@@ -150,27 +157,27 @@ func (h *ConsumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession,
 }
 
 // processRentalMessage handles rental messages and returns true if successful
-func (h *ConsumerGroupHandler) processRentalMessage(movieID string, priceStr string) bool {
-	fmt.Printf("Received message: movies %s price %s\n", movieID, priceStr)
+func (h *ConsumerGroupHandler) processRentalMessage(movieID string, priceStr string, title string, requestID string) bool {
+	fmt.Printf("[req=%s] Received message: %q (movie %s) price %s\n", requestID, title, movieID, priceStr)
 
-	if err := database.CreateOrUpdateRental(h.db, movieID, priceStr); err != nil {
-		log.Printf("Error processing the rental request: %v", err)
+	if err := database.CreateOrUpdateRental(h.db, movieID, priceStr, h.namespace, title, requestID); err != nil {
+		log.Printf("[req=%s] Error processing the rental request: %v", requestID, err)
 		return false
 	}
 
-	fmt.Printf("Successfully created/updated rental: %s - message committed\n", movieID)
+	fmt.Printf("[req=%s] Successfully created/updated rental: %q (movie %s) - message committed\n", requestID, title, movieID)
 	return true
 }
 
 // processReturnMessage handles return messages and returns true if successful
-func (h *ConsumerGroupHandler) processReturnMessage(catalogID string) bool {
-	fmt.Printf("Received return message: catalogID %s\n", catalogID)
+func (h *ConsumerGroupHandler) processReturnMessage(catalogID string, title string, requestID string) bool {
+	fmt.Printf("[req=%s] Received return message: %q (catalogID %s)\n", requestID, title, catalogID)
 
-	if err := database.DeleteRental(h.db, catalogID); err != nil {
-		log.Printf("Error processing the delete rental request: %v", err)
+	if err := database.DeleteRental(h.db, catalogID, title, requestID); err != nil {
+		log.Printf("[req=%s] Error processing the delete rental request: %v", requestID, err)
 		return false
 	}
 
-	fmt.Printf("Successfully deleted rental: %s - message committed\n", catalogID)
+	fmt.Printf("[req=%s] Successfully deleted rental: %q (catalogID %s) - message committed\n", requestID, title, catalogID)
 	return true
 }

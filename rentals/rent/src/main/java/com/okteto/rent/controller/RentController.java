@@ -9,6 +9,7 @@ import org.apache.kafka.common.header.internals.RecordHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -22,6 +23,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Collections;
+import java.util.UUID;
 
 @RestController
 public class RentController {
@@ -35,6 +37,38 @@ public class RentController {
 
     @Autowired
     private RentalRepository rentalRepository;
+
+    // This rent-api only ever serves its own personal frontend (it's never
+    // diverted/shared), so when a caller sends no baggage header — e.g. real
+    // browser traffic, since nothing upstream of a personal deployment sets
+    // one — it's always correct to self-tag Kafka messages with our own
+    // namespace rather than leave them untagged.
+    @Value("${KUBERNETES_NAMESPACE:}")
+    private String ownNamespace;
+
+    private String effectiveBaggage(String baggage) {
+        if (baggage != null && !baggage.isEmpty()) {
+            return baggage;
+        }
+        return "okteto-divert=" + ownNamespace;
+    }
+
+    // Short correlation ID generated once per request. Every worker consuming
+    // the shared Kafka topic logs this same ID — whether it accepts or skips
+    // the message — so log lines from different namespaces can be matched up
+    // as "the same event" instead of relying on timestamps.
+    private String newRequestId() {
+        return UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    // Title carries no routing meaning — it's attached purely so every log
+    // line (accept or skip, on any worker) is human-readable instead of just
+    // a bare movie ID.
+    private void tagCommonHeaders(ProducerRecord<String, String> record, String baggage, String title, String requestId) {
+        record.headers().add(new RecordHeader("baggage", effectiveBaggage(baggage).getBytes(StandardCharsets.UTF_8)));
+        record.headers().add(new RecordHeader("title", (title != null ? title : "").getBytes(StandardCharsets.UTF_8)));
+        record.headers().add(new RecordHeader("request-id", requestId.getBytes(StandardCharsets.UTF_8)));
+    }
 
     @GetMapping(path= "/rent/healthz", produces = "application/json")
     Map<String, String> healthz() {
@@ -58,24 +92,22 @@ public class RentController {
                       @RequestHeader(value = "baggage", required = false) String baggage) {
         String movieID = rentInput.getId();
         String price = rentInput.getPrice();
+        String title = rentInput.getTitle();
+        String requestId = newRequestId();
 
-        logger.info("Rent [{},{}] received", movieID, price);
+        logger.info("[req={}] Rent [{},{}] '{}' received", requestId, movieID, price, title);
 
         // Create ProducerRecord to add custom headers
         ProducerRecord<String, String> record = new ProducerRecord<>(KAFKA_TOPIC_RENTALS, movieID, price.toString());
-
-        // Add baggage header to Kafka message if present
-        if (baggage != null && !baggage.isEmpty()) {
-            logger.info("Baggage header received: {}", baggage);
-            record.headers().add(new RecordHeader("baggage", baggage.getBytes(StandardCharsets.UTF_8)));
-        }
+        tagCommonHeaders(record, baggage, title, requestId);
 
         kafkaTemplate.send(record)
-        .thenAccept(result -> logger.info("Message [{}] delivered with offset {}",
+        .thenAccept(result -> logger.info("[req={}] Message [{}] delivered with offset {}",
+                        requestId,
                         movieID,
                         result.getRecordMetadata().offset()))
         .exceptionally(ex -> {
-            logger.warn("Unable to deliver message [{}]. {}", movieID, ex.getMessage());
+            logger.warn("[req={}] Unable to deliver message [{}]. {}", requestId, movieID, ex.getMessage());
             return null;
         });
 
@@ -87,24 +119,22 @@ public class RentController {
     public Map<String, String> returnMovie(@RequestBody ReturnRequest returnRequest,
                                            @RequestHeader(value = "baggage", required = false) String baggage) {
         String movieID = returnRequest.getMovieID();
+        String title = returnRequest.getTitle();
+        String requestId = newRequestId();
 
-        logger.info("Return [{}] received", movieID);
+        logger.info("[req={}] Return [{}] '{}' received", requestId, movieID, title);
 
         // Create ProducerRecord to add custom headers
         ProducerRecord<String, String> record = new ProducerRecord<>(KAFKA_TOPIC_RETURNS, movieID, movieID);
-
-        // Add baggage header to Kafka message if present
-        if (baggage != null && !baggage.isEmpty()) {
-            logger.info("Baggage header received: {}", baggage);
-            record.headers().add(new RecordHeader("baggage", baggage.getBytes(StandardCharsets.UTF_8)));
-        }
+        tagCommonHeaders(record, baggage, title, requestId);
 
         kafkaTemplate.send(record)
-        .thenAccept(result -> logger.info("Return message [{}] delivered with offset {}",
+        .thenAccept(result -> logger.info("[req={}] Return message [{}] delivered with offset {}",
+                        requestId,
                         movieID,
                         result.getRecordMetadata().offset()))
         .exceptionally(ex -> {
-            logger.warn("Unable to deliver return message [{}]. {}", movieID, ex.getMessage());
+            logger.warn("[req={}] Unable to deliver return message [{}]. {}", requestId, movieID, ex.getMessage());
             return null;
         });
 
@@ -115,12 +145,23 @@ public class RentController {
         @JsonProperty("id")
         private String movieID;
 
+        @JsonProperty("title")
+        private String title;
+
         public void setMovieID(String movieID) {
             this.movieID = movieID;
         }
 
         public String getMovieID() {
             return movieID;
+        }
+
+        public String getTitle() {
+            return title;
+        }
+
+        public void setTitle(String title) {
+            this.title = title;
         }
     }
 }

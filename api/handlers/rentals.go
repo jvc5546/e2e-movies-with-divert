@@ -13,8 +13,9 @@ import (
 )
 
 type Rental struct {
-	ID    string `json:"id,omitempty"`
-	Price string `json:"price,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Price     string `json:"price,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 type Catalog struct {
@@ -24,6 +25,10 @@ type Catalog struct {
 	BackdropPath  string  `json:"backdrop_path,omitempty"`
 	Price         float64 `json:"price,omitempty"`
 	Overview      string  `json:"overview,omitempty"`
+	// Namespace is only set for rentals — it's the personal namespace whose
+	// worker actually processed this rental, surfaced in the UI as a "processed
+	// by" badge to make cross-namespace Kafka routing visible without a CLI.
+	Namespace string `json:"namespace,omitempty"`
 }
 
 func GetRentalsWithCatalogInfo(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +59,7 @@ func GetRentalsWithCatalogInfo(w http.ResponseWriter, r *http.Request) {
 			if r.ID == strconv.Itoa(m.ID) {
 				price, _ := strconv.ParseFloat(r.Price, 64)
 				m.Price = price
+				m.Namespace = r.Namespace
 				result = append(result, m)
 			}
 		}

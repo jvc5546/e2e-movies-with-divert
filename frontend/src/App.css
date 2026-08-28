@@ -275,6 +275,18 @@ a:hover {
   font-size: 26px;
 }
 
+.Item__namespace {
+  background: rgba(0, 209, 202, 0.15);
+  border: 1px solid #00D1CA;
+  color: #00D1CA;
+  border-radius: 12px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 0.02em;
+  margin-bottom: 6px;
+}
+
 .Item:hover .Item__overlay {
   opacity: 1;
   pointer-events: all;

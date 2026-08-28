@@ -1,197 +1,55 @@
-# Okteto Divert Demo - Movies App
+# Movies — Divert Demo (Shared Subset + State Isolation)
 
-## What is Divert?
+This demo shows [Okteto Divert](https://www.okteto.com/docs/core/divert/) used in a topology where the shared environment runs only a **subset** of services, and every developer deploys the rest personally — including a stateful service that safely shares infrastructure with everyone else, without a database per developer and without VolumeSnapshot resets.
 
-Okteto's Divert feature allows developers to work on individual microservices without deploying the entire application stack. It uses HTTP header-based routing to intelligently route traffic between shared services and your personal development instances.
+## What's running where
 
-**Note**: This demo uses the **Nginx driver with Linkerd** for header-based routing. Okteto Divert also works natively with **Istio** (no Linkerd required). Choose the driver based on your existing service mesh infrastructure.
+**Shared namespace** — `okteto.shared.yaml`
+- `catalog` (+ MongoDB) — read-only movie reference data, safe to share since nothing ever writes to it
+- `Kafka` — the event bus for rentals
 
-### Key Benefits
+**Personal namespace** — `okteto.personal.yaml` (every developer deploys this)
+- `frontend`, `api`, `rent-api`, `worker`, and their own local Postgres
+- Diverts `catalog` from shared over Divert's HTTP service mirroring (no extra config needed)
+- Connects to the shared `Kafka` over an explicit cross-namespace address (Divert's header routing only applies to HTTP, not raw TCP)
 
-- **Massive Resource Savings**: Deploy only the services you're working on
-- **Faster Setup**: Environment ready in seconds instead of waiting for all services to deploy
-- **Isolation**: Your changes don't affect other developers
-- **Production-like**: Test against real shared services
-- **Cost Efficient**: Share expensive infrastructure (databases, message queues)
+## How state isolation works
 
-### How It Works
+Every personal `rent-api` publishes rental/return events to the *same* shared Kafka topics, tagging each message with its own namespace. Every personal `worker` has its own consumer group, so it sees the *entire* shared event stream — but only writes messages tagged for its own namespace into its own Postgres, ignoring everyone else's. The event log is shared; each developer's rental state is a private, isolated projection of only their own events. A "Processed by: `<namespace>`" badge on each rental in the UI (and in `GET /api/rent`) shows which worker actually wrote that row.
 
-1. **Shared Namespace**: A complete Movies app stack runs in a shared staging namespace
-2. **Personal Namespace**: Your namespace contains only the service(s) you're developing
-3. **Smart Routing**: Nginx ingress (with Linkerd sidecar) routes requests with the `baggage: okteto-divert=<your-namespace>` header to your services
-4. **Header Propagation**: The baggage header is automatically propagated through all service calls
+## Try it
 
-### Divert Drivers
-
-Okteto Divert supports two drivers:
-
-- **Nginx + Linkerd** (this demo): Uses Nginx ingress controller with Linkerd service mesh for header-based routing
-- **Istio** (native): Uses Istio's built-in VirtualService for header-based routing without requiring additional components
-
-To use Istio instead, add `driver: istio` in the divert configurations in the okteto manifest.
-
-## Quick Start
-
-### Prerequisites
-
-- Okteto CLI installed (`brew install okteto` or download from [okteto.com](https://okteto.com))
-- kubectl configured
-- Access to an Okteto cluster
-- Modheader (or a similar extension that enables host header customization) on your browser
-
-### Setup Steps
-
-#### Deploy the Shared Environment
-
-1. **Clone the repository**
+1. **Deploy the shared subset**
    ```bash
-   git clone https://github.com/okteto-community/movies-with-divert
-   cd movies-with-divert
+   okteto deploy -f okteto.shared.yaml --namespace movies-shared
    ```
 
-2. **Deploy the shared environment**
+2. **Deploy your personal environment**, diverting from shared
    ```bash
-   okteto preview deploy --repository https://github.com/okteto-community/movies-with-divert --label=okteto-shared movies-shared
+   okteto deploy -f okteto.personal.yaml --namespace movies-dev-a -v OKTETO_SHARED_NAMESPACE=movies-shared
    ```
 
-The movies application is composed of five microservices: Frontend, API Gateway, Catalog, Rent, and Worker. Each service is defined in a subfolder. Note that Okteto Divert works independently of the deployment mechanism or architecture. 
+3. **Rent a movie** at `https://movies-movies-dev-a.<domain>` — the rental card shows `Processed by: movies-dev-a`.
 
-This is what the application looks like:
+4. **Deploy a second personal environment** the same way (`movies-dev-b`), rent a different movie there, and refresh dev-a's tab — its list is unaffected. Both `rent-api`s published to the same shared Kafka topics; each worker only materialized its own.
 
-![Architecture diagram](docs/architecture-diagram.png)
-
-#### Deploy your personal Development Environment
-
-The key advantage of divert is that you only need to deploy the service(s) you are actively working, rather than the full application.
-
-To deploy your development environment export the `OKTETO_SHARED_NAMESPACE` environment variable, and run the `okteto deploy` command with the corresponding okteto manifest. 
-```
-export OKTETO_SHARED_NAMESPACE="movies-shared"
-okteto up -f okteto.catalog.yaml
-```
-
-After this, access the application via the endpoint. You'll notice that it still access the shared service. In order for the request to access your personal copy of the catalog service, set the baggage header as shown below, where `cindy` is the name of your personal namespace. We recommend ModHeader for browser-based requests. 
-
-```
-baggage: okteto-divert=cindy
-```
-
-You can also easily test it from the terminal:
-
-```
-# without the header 
-> curl https://movies-movies-shared.demo.okteto.dev/api/catalog/healthz
-{
-"status": "ok",
-"namespace": "movies-shared"
-}
-```
-
-
-```
-curl -H "baggage: okteto-divert=cindy" https://movies-movies-shared.demo.okteto.dev/api/catalog/healthz
-{
-"status": "ok",
-"namespace": "cindy"
-}
-```
-
-After setting the host header, hit the application again. Notice how now the request is being automatically routed to your copy of the catalog service. This is the power of Okteto Divert! Get a full end to end experience, while deploying only the services you are actively working on. 
-
-#### Available Divert Configurations:
-
-This repository contains samples for different configurations.
-
-##### 1. Frontend Development (`okteto.frontend.yaml`)
-**Use when**: Working on React UI components, user interactions, or frontend features
-
-**What it deploys**:
-- Frontend service only (React/Node.js)
-
-**Shares**:
-- Catalog service
-- API Gateway service
-- Rent service
-- Worker service
-
-##### 2. Catalog Development (`okteto.catalog.yaml`)
-**Use when**: Working on movie catalog, inventory management, or MongoDB integration
-
-**What it deploys**:
-- Catalog service only (Node.js/Express)
-- MongoDB
-
-**Shares**:
-- Frontend
-- API service
-- Rent service
-
-
-##### 3. API Gateway Development (`okteto.api.yaml`)
-**Use when**: Working on the public API
-
-**What it deploys**:
-- API Gateway service only (Golang)
-
-**Shares**:
-- Frontend
-- Catalog service
-- Rent service
-- Worker Service
-
-##### 4. Rent Development (`okteto.rent.yaml`)
-**Use when**: Working on rental logic, message processing, and Kafka integration
-
-**What it deploys**:
-- Rent service only (Java/Spring Boot)
-- Worker Service
-- Kafka
-- PostgresSQL
-
-**Shares**:
-- Frontend
-- Catalog service
-- API service
-
-
-
-## Baggage Header Propagation
-Note that all the services of the movies app have been instrumented with baggage header propagation. This is so that Okteto Divert routing works seamlessly across all services.
-
-
-## Best Practices
-
-1. **Use descriptive namespace names**: `<your-name>-movies` or `<feature-name>-movies`
-2. **Clean up when done**: Delete personal namespaces after development
+5. **Confirm it in the logs** — tail both workers while renting in either app:
    ```bash
-   okteto namespace delete alice-movies
+   kubectl logs -n movies-dev-a deploy/worker -f
+   kubectl logs -n movies-dev-b deploy/worker -f
    ```
-3. **Monitor resource usage**: Check your namespace doesn't exceed quotas
-4. **Keep shared staging updated**: Regularly update the shared environment
-5. **Use preview environments**: For major changes, consider full preview environments
+   Both workers see every event; each only acts on its own (`Successfully created/updated rental`) and explicitly skips the other's (`Not processing message, it belongs to a diverted worker`).
 
-## Advanced Usage
-
-### Switching to Istio Driver
-
-This demo is configured for **Nginx + Linkerd**. To use **Istio** instead:
-
-1. Edit the divert configuration files (e.g., `okteto-frontend-divert.yaml`)
-2. Change the driver:
-   ```yaml
-   divert:
-     namespace: ${SHARED_NAMESPACE:-staging}
-     driver: istio  # Changed from 'nginx'
+6. **Run the e2e suites**
+   ```bash
+   okteto test e2e -f okteto.shared.yaml --namespace movies-shared      # catalog-only checks
+   okteto test e2e -f okteto.personal.yaml --namespace movies-dev-a     # full app + rent/return round-trip
    ```
-3. Deploy normally - Istio will handle routing without Linkerd
 
-
-## Support
-
-- **Documentation**: [okteto.com/docs/divert](https://okteto.com/docs)
-- **GitHub Issues**: [github.com/okteto/movies/issues](https://github.com/okteto/movies/issues)
-- **Community**: [community.okteto.com](https://community.okteto.com)
-- **Slack**: [okteto.com/slack](https://okteto.com/slack)
+## Cleanup
+```bash
+okteto namespace delete movies-shared movies-dev-a movies-dev-b
+```
 
 ## License
-Apache License 2.0 - See LICENSE file for details
+Apache License 2.0 — see [LICENSE](LICENSE)

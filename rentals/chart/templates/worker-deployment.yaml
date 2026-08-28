@@ -6,7 +6,7 @@ metadata:
     app: worker
   name: worker
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.worker.replicaCount }}
   selector:
     matchLabels:
       app: worker
@@ -25,4 +25,13 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        - name: KAFKA_ADDRESS
+          value: {{ .Values.worker.kafkaAddress | quote }}
+        # OKTETO_DIVERTED_ENVIRONMENT is intentionally NOT set here — Okteto's
+        # platform auto-injects it into pods that are part of a diverted
+        # environment (confirmed empirically: setting it explicitly collides
+        # with the platform's own mutating webhook and the deployment is
+        # rejected by the API server). This matches what main.go always
+        # expected: getEnv("OKTETO_DIVERTED_ENVIRONMENT", "") with no chart
+        # wiring.
 {{- end}}

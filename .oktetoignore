@@ -11,7 +11,8 @@
 
 
 [test]
-!tests/tests/main.spec.js
-!tests/tests/Dockerfile
-!tests/tests/package.json
-!tests/tests/playwright.config.js
+!tests/tests/subset.spec.js
+!tests/tests/full.spec.js
+!tests/Dockerfile
+!tests/package.json
+!tests/playwright.config.js

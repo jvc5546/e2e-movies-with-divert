@@ -51,7 +51,10 @@ class App extends Component {
       },
       body: JSON.stringify({
         id: item.id,
-        price: item.price
+        price: item.price,
+        // Log-only: lets worker logs show which movie a Kafka message is for
+        // instead of just a bare ID. See RentController.java / kafka.go.
+        title: item.original_title
       })
     });
     this.refreshData();
@@ -64,7 +67,8 @@ class App extends Component {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        id: item.id
+        id: item.id,
+        title: item.original_title
       })
     });
     this.refreshData();
@@ -236,6 +240,13 @@ const Item = ({ item, onRent, onReturn, backdrop }) => {
               </div>
             </> :
             <>
+              {/* Namespace of the personal worker that processed this rental via
+                  the shared Kafka topic — makes cross-namespace Divert routing
+                  visible without a CLI. See api/handlers/rentals.go and
+                  rentals/worker/pkg/kafka/kafka.go. */}
+              {item?.namespace &&
+                <div className='Item__namespace'>Processed by: {item.namespace}</div>
+              }
               <div className="Item__button Item__button--rented button">
                 Watch Now
               </div>

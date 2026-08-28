@@ -1,5 +1,14 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// The @subset suite (run against okteto.shared.yaml) doesn't use BASE_URL at
+// all — it hits catalog directly over in-cluster DNS, since shared has no
+// ingress-exposed frontend. The @full suite (run against a personal
+// namespace, via okteto.personal.yaml) uses it. Note this topology has no
+// blanket baggage header here (unlike the single-service-diverted demo):
+// frontend/api/rent-api are always fully personal, never split between
+// shared/personal, so there's no HTTP-level divert routing to steer with a
+// header. The baggage header only matters for Kafka message tagging in the
+// rent/return flow, set per-request where that's tested, not globally here.
 const BASE_URL = `https://movies-${process.env.OKTETO_NAMESPACE}.${process.env.OKTETO_DOMAIN}`;
 
 /**

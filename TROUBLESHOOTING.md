@@ -78,3 +78,34 @@ kubectl get namespace movies-staging -o yaml | grep okteto-shared
 ```
 
 **Note**: This issue only applies when using the Nginx driver. Istio driver does not require Linkerd.
+
+## Shared-Subset Kafka Isolation (`okteto.shared.yaml` + `okteto.personal.yaml`)
+
+This topology shares only `catalog` + Kafka; every developer deploys their own `rent-api` + `worker` + local Postgres via `okteto.personal.yaml`, publishing/consuming the *same* shared Kafka topics. Isolation depends on each worker's consumer-group filter, not on separate infrastructure per developer.
+
+### Issue: rentals never show up for a developer
+
+**Likely cause**: the worker's baggage filter (`rentals/worker/pkg/kafka/kafka.go`, `shouldProcessMessage`) is rejecting every message — usually because `OKTETO_DIVERTED_ENVIRONMENT` doesn't match what `rent-api` is tagging messages with.
+
+```bash
+# Confirm the worker's own namespace/divert key match
+kubectl exec -n <your-namespace> deploy/worker -- env | grep -E 'KUBERNETES_NAMESPACE|OKTETO_DIVERTED_ENVIRONMENT'
+
+# Watch the worker accept/reject messages live
+kubectl logs -n <your-namespace> deploy/worker -f
+# "Successfully created/updated rental" = accepted
+# "Not processing message, it belongs to a diverted worker" = rejected (expected for other devs' events)
+```
+
+### Issue: verifying two developers' rentals don't leak into each other
+
+```bash
+# Each personal worker gets its own consumer group over the shared topics —
+# confirm both groups exist and are independently making progress
+kubectl exec -n <shared-namespace> deploy/kafka -- \
+  kafka-consumer-groups.sh --bootstrap-server localhost:9092 --list | grep movies-worker-group
+
+kubectl exec -n <shared-namespace> deploy/kafka -- \
+  kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group movies-worker-group-<namespace>
+```
+If dev A's Postgres rows ever show a different namespace in the `namespace` column (visible directly in the UI's "Processed by" badge, or via `GET /api/rent`), the filter isn't working — check the log lines above first.

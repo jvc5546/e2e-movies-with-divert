@@ -1,5 +1,10 @@
 icon: https://apps.okteto.com/movies/icon.png
 
+# Single-namespace reference mode: deploys the entire app with no Divert at
+# all. Useful for a quick local/CI smoke test. This is no longer "the shared
+# environment" for the subset-shared demo — see okteto.shared.yaml (shared
+# subset: catalog + Kafka) and okteto.personal.yaml (per-developer app tier).
+
 build:
   api:
     context: api
@@ -84,7 +89,7 @@ test:
       - node_modules
     commands:
       - yarn install
-      - yarn test
+      - yarn test  # both @subset and @full tags — everything is co-located here
     artifacts:
       - test-results
       - playwright-report

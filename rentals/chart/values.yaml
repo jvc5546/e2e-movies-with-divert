@@ -2,11 +2,13 @@ api:
   enabled: true
   image: ""
   replicaCount: 1
+  kafkaBootstrapServers: "kafka:9092"
 
 worker:
   enabled: true
   image: ""
   replicaCount: 1
+  kafkaAddress: "kafka:9092"
 
 kafka:
   enabled: true

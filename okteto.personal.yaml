@@ -1,0 +1,105 @@
+icon: https://apps.okteto.com/movies/icon.png
+
+# Deploys the app tier a developer actually works on: frontend + api + the
+# rentals app (rent-api + worker + a LOCAL Postgres). Diverts catalog + Kafka
+# from the shared namespace (see okteto.shared.yaml) — catalog over Divert's
+# HTTP service mirroring, Kafka over an explicit cross-namespace address
+# (Divert doesn't apply to raw TCP protocols).
+#
+# Every developer who wants a working app deploys this — "dev A" and "any
+# other dev" both run it, each isolated from the other by the Kafka baggage
+# filter in rentals/worker/pkg/kafka/kafka.go: each personal worker gets the
+# full shared event stream but only materializes messages tagged for its own
+# namespace into its own local Postgres.
+
+build:
+  frontend:
+    context: frontend
+  api:
+    context: api
+  rent:
+    context: rentals/rent
+  worker:
+    context: rentals/worker
+  tests:
+    context: tests
+
+deploy:
+  divert:
+    namespace: ${OKTETO_SHARED_NAMESPACE}
+  commands:
+    - name: Deploy Frontend
+      command: helm upgrade --install frontend frontend/chart --set image=${OKTETO_BUILD_FRONTEND_IMAGE} --take-ownership
+    - name: Deploy API
+      command: helm upgrade --install api api/chart --set image=${OKTETO_BUILD_API_IMAGE} --take-ownership
+    - name: Deploy Rentals (app tier, local Postgres, shared Kafka)
+      command: >-
+        helm upgrade --install rentals rentals/chart
+        --set kafka.enabled=false
+        --set postgresql.enabled=true
+        --set api.enabled=true
+        --set worker.enabled=true
+        --set api.image=${OKTETO_BUILD_RENT_IMAGE}
+        --set worker.image=${OKTETO_BUILD_WORKER_IMAGE}
+        --set api.kafkaBootstrapServers=kafka.${OKTETO_SHARED_NAMESPACE}.svc.cluster.local:9092
+        --set worker.kafkaAddress=kafka.${OKTETO_SHARED_NAMESPACE}.svc.cluster.local:9092
+        --take-ownership
+
+dev:
+  frontend:
+    image: okteto/node:20
+    workdir: /usr/src/app
+    command: bash
+    sync:
+      - frontend:/usr/src/app
+
+  api:
+    image: okteto/golang:1.24
+    workdir: /usr/src/app
+    command: bash
+    securityContext:
+      capabilities:
+        add:
+        - SYS_PTRACE
+    sync:
+      - api:/usr/src/app
+    forward:
+      - 2346:2345
+
+  rent:
+    command: mvn spring-boot:run
+    workdir: /app
+    sync:
+      - rentals/rent:/app
+    volumes:
+      - /root/.m2
+    forward:
+      - 5005:5005
+      - 5432:postgresql:5432
+
+  worker:
+    image: okteto/golang:1.24
+    workdir: /usr/src/app
+    command: bash
+    securityContext:
+      capabilities:
+        add:
+        - SYS_PTRACE
+    sync:
+      - rentals/worker:/usr/src/app
+    forward:
+      - 2345:2345
+
+test:
+  e2e:
+    image: ${OKTETO_BUILD_TESTS_IMAGE}
+    context: tests
+    caches:
+      - yarn/.cache
+      - node_modules
+    commands:
+      - yarn install
+      - yarn test --grep @full
+    artifacts:
+      - test-results
+      - playwright-report
